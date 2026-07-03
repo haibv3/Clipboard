@@ -2,6 +2,9 @@
 build/
 dist/
 
+# Stitch design concept exports (regenerable)
+stitch-exports/
+
 # Compiled GSettings schemas
 src/schemas/*.compiled
 

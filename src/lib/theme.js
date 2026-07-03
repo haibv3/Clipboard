@@ -100,40 +100,51 @@ export function getPalette() {
         return {
             isDark: true,
             accent: { ...accent, hex: accentHex },
-            // Window chrome — Yaru dark uses a warm-tinted near-black.
+            // Surface hierarchy — card body, header/footer, search, hover.
             bg: 'rgba(31, 31, 33, 0.98)',
             bgSolid: '#1f1f21',
-            fg: '#f4f4f4',
-            dim: 'rgba(255, 255, 255, 0.45)',
-            card: 'rgba(255, 255, 255, 0.04)',
-            cardHover: 'rgba(255, 255, 255, 0.08)',
-            cardSelected: _rgba(accentHex, 0.20),
+            bgHigh: '#2a2a2c',       // header + footer
+            bgLow: '#0e0e10',        // search input (deepest)
+            bgBright: '#39393b',     // row hover
+            bgHighest: '#353437',    // thumbnail placeholder
+            fg: '#e4e2e4',           // on-surface
+            dim: '#c1c6d4',          // on-surface-variant (metadata, hints)
+            card: 'transparent',
+            cardHover: '#39393b',
+            cardSelected: _rgba(accentHex, 0.15),
             cardSelectedBorder: accentHex,
-            border: 'rgba(255, 255, 255, 0.10)',
-            entryBg: 'rgba(255, 255, 255, 0.04)',
+            border: '#414752',       // outline-variant
+            entryBg: '#0e0e10',
             entryFocusBg: _rgba(accentHex, 0.12),
             shadow: 'rgba(0, 0, 0, 0.60)',
-            pin: '#f5c249', // starred (amber) — reads as "saved"
+            pin: '#f5c249',          // starred (amber)
+            destructive: '#ffb4ab',  // error/destructive text
+            destructiveHover: _rgba('#e62d42', 0.20),
         };
     }
 
     return {
         isDark: false,
         accent: { ...accent, hex: accentHex },
-        // Yaru light — clean white with a subtle warm undertone.
         bg: 'rgba(252, 252, 252, 0.98)',
         bgSolid: '#fcfcfc',
+        bgHigh: '#f4f4f5',         // header + footer
+        bgLow: '#ffffff',          // search input
+        bgBright: '#eeedee',       // row hover
+        bgHighest: '#e8e7e8',      // thumbnail placeholder
         fg: 'rgba(0, 0, 0, 0.88)',
-        dim: 'rgba(0, 0, 0, 0.45)',
-        card: 'rgba(0, 0, 0, 0.025)',
-        cardHover: 'rgba(0, 0, 0, 0.05)',
-        cardSelected: _rgba(accentHex, 0.15),
+        dim: 'rgba(0, 0, 0, 0.55)',
+        card: 'transparent',
+        cardHover: '#eeedee',
+        cardSelected: _rgba(accentHex, 0.12),
         cardSelectedBorder: accentHex,
-        border: 'rgba(0, 0, 0, 0.08)',
-        entryBg: 'rgba(0, 0, 0, 0.025)',
+        border: 'rgba(0, 0, 0, 0.10)',
+        entryBg: '#ffffff',
         entryFocusBg: _rgba(accentHex, 0.10),
         shadow: 'rgba(0, 0, 0, 0.25)',
         pin: '#c88800',
+        destructive: '#c01c28',
+        destructiveHover: _rgba('#e62d42', 0.12),
     };
 }
 

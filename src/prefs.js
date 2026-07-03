@@ -159,8 +159,8 @@ export default class ClipboardPrefs extends ExtensionPreferences {
 
         page.add(images);
 
-        // --- Danger zone ---
-        const danger = new Adw.PreferencesGroup({ title: 'History' });
+        // --- Maintenance ---
+        const danger = new Adw.PreferencesGroup({ title: 'Maintenance' });
 
         const clearRow = new Adw.ActionRow({
             title: 'Clear history now',

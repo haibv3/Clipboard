@@ -1,6 +1,6 @@
 /*
  * Clipboard extension stylesheet.
- * Overlay picker styles — Ubuntu/Yaru-inspired modern design.
+ * Overlay picker — GNOME Adwaita-inspired design (Stitch concept).
  *
  * Structural rules (padding, spacing, radius, font sizes) live here.
  * Colors are injected at runtime by lib/theme.js via set_style() so
@@ -13,22 +13,24 @@
  * before _applyTheme() runs, and in case set_style fails. */
 .clipboard-picker {
     background-color: rgba(31, 31, 33, 0.98);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 16px;
+    border: 1px solid #414752;
+    border-radius: 12px;
     padding: 0;
     spacing: 0;
-    color: #f4f4f4;
+    color: #e4e2e4;
     font-size: 14px;
 }
 
 /* --- Title bar --- */
+/* Header gets a distinct surface-high background (injected by theme.js). */
 .clipboard-titlebar {
-    padding: 14px 16px 12px 16px;
+    padding: 10px 14px;
     spacing: 10px;
+    border-radius: 12px 12px 0 0;
 }
 
 .clipboard-title-box {
-    spacing: 1px;
+    spacing: 0px;
 }
 
 .clipboard-title {
@@ -49,29 +51,31 @@
 }
 
 /* --- Search entry --- */
+/* Pill shape (rounded-full) per Stitch concept. */
 .clipboard-search-entry {
-    margin: 0 16px;
-    padding: 9px 12px;
-    border-radius: 10px;
+    margin: 12px 14px;
+    padding: 8px 14px;
+    border-radius: 9999px;
     font-size: 14px;
 }
 
 /* --- Scroll + list --- */
 .clipboard-scroll {
-    padding: 8px 12px 4px 12px;
+    padding: 4px 8px 4px 8px;
+    -st-scrollbar-width: 4px;
 }
 
 .clipboard-list {
-    spacing: 3px;
+    spacing: 2px;
 }
 
 /* --- Section headers --- */
 .clipboard-section-header {
-    padding: 10px 6px 4px 6px;
+    padding: 10px 8px 4px 8px;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 800;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 1.2px;
 }
 
 .clipboard-section-spacer {
@@ -80,24 +84,41 @@
 
 /* --- Row --- */
 .clipboard-row {
-    padding: 9px 10px;
-    border-radius: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
     spacing: 10px;
     min-height: 20px;
 }
 
+/* Inner content box (thumb + text + actions). */
+.clipboard-row-inner {
+    spacing: 10px;
+}
+
+/* Two-line text column (preview + metadata). */
+.clipboard-row-text {
+    spacing: 1px;
+}
+
 .clipboard-row-preview {
-    font-size: 13px;
+    font-size: 14px;
+    font-weight: 400;
+}
+
+.clipboard-row-meta {
+    font-size: 12px;
     font-weight: 400;
 }
 
 .clipboard-row-thumb {
     padding: 0;
     margin: 0;
+    border-radius: 6px;
 }
 
 .clipboard-row-thumb-placeholder {
     padding: 0 2px;
+    border-radius: 6px;
 }
 
 /* Row action buttons */
@@ -114,21 +135,28 @@
 }
 
 /* --- Footer --- */
+/* Footer gets a distinct surface-high background (injected by theme.js). */
 .clipboard-footer {
-    padding: 10px 16px 12px 16px;
+    padding: 10px 14px;
     spacing: 8px;
+    border-radius: 0 0 12px 12px;
+}
+
+.clipboard-footer-inner {
+    spacing: 6px;
 }
 
 .clipboard-count {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 400;
 }
 
 .clipboard-clear-all.button {
-    padding: 5px 12px;
+    padding: 5px 10px;
     border-radius: 8px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
+    spacing: 5px;
 }
 
 .clipboard-clear-all.button:hover {

@@ -276,6 +276,8 @@ export class ClipboardPicker {
         this._actor.add_child(this._scroll);
 
         // --- Footer ---
+        // Distinct surface-high bg (injected by theme.js). Icon + label
+        // inside the clear-all button per Stitch concept.
         this._footer = new St.BoxLayout({
             style_class: 'clipboard-footer',
             x_expand: true,
@@ -285,12 +287,22 @@ export class ClipboardPicker {
         this._countLabel.set_y_align(Clutter.ActorAlign.CENTER);
         this._footer.add_child(this._countLabel);
 
+        const clearAllInner = new St.BoxLayout({
+            style_class: 'clipboard-footer-inner',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        clearAllInner.add_child(new St.Icon({
+            icon_name: 'edit-clear-all-symbolic',
+            icon_size: 14,
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+        clearAllInner.add_child(new St.Label({ text: 'Clear all' }));
         this._clearAllBtn = new St.Button({
             style_class: 'clipboard-clear-all button',
-            label: 'Clear all',
             can_focus: true,
             x_align: Clutter.ActorAlign.END,
             y_align: Clutter.ActorAlign.CENTER,
+            child: clearAllInner,
         });
         this._clearAllBtn.connect('clicked', () => {
             this._store.clear();
@@ -386,7 +398,13 @@ export class ClipboardPicker {
             }
         }
 
-        this._highlighted = items.length > 0 ? 0 : -1;
+        // Preserve highlight position when possible (e.g. while typing in
+        // search); only reset to 0 if out of range or nothing was selected.
+        if (this._highlighted < 0 && items.length > 0) {
+            this._highlighted = 0;
+        } else if (this._highlighted >= items.length) {
+            this._highlighted = items.length > 0 ? 0 : -1;
+        }
         this._applyHighlight();
         this._applyTheme();
     }
@@ -457,6 +475,7 @@ export class ClipboardPicker {
         row.set_child(inner);
 
         // Image thumbnail goes first (left side) for visual scanning.
+        // 40×40 with border per Stitch concept.
         if (item.type === 'image' && item.thumbBytes) {
             this._addThumbnail(inner, item.thumbBytes);
         } else if (item.type === 'image') {
@@ -469,7 +488,14 @@ export class ClipboardPicker {
             }));
         }
 
-        // Preview content.
+        // Two-line text column: primary preview + secondary metadata.
+        const textCol = new St.BoxLayout({
+            style_class: 'clipboard-row-text',
+            vertical: true,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
         let previewText;
         if (item.type === 'text') {
             previewText = (item.text ?? '').replace(/\s+/g, ' ').trim();
@@ -487,7 +513,19 @@ export class ClipboardPicker {
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        inner.add_child(preview);
+        textCol.add_child(preview);
+
+        // Metadata line: relative timestamp + type label.
+        const metaText = this._formatMeta(item);
+        if (metaText) {
+            textCol.add_child(new St.Label({
+                style_class: 'clipboard-row-meta',
+                text: metaText,
+                x_expand: true,
+                y_align: Clutter.ActorAlign.CENTER,
+            }));
+        }
+        inner.add_child(textCol);
 
         // Pin toggle.
         const pinIcon = item.pinned ? 'starred-symbolic' : 'non-starred-symbolic';
@@ -538,11 +576,12 @@ export class ClipboardPicker {
     }
 
     _addThumbnail(row, thumbBytes) {
-        // Render a real thumbnail via Gio.BytesIcon.
+        // Render a real thumbnail via Gio.BytesIcon. 40×40 with border
+        // per Stitch concept.
         try {
             const icon = new St.Icon({
                 gicon: Gio.BytesIcon.new(thumbBytes),
-                icon_size: 36,
+                icon_size: 40,
                 style_class: 'clipboard-row-thumb',
                 y_align: Clutter.ActorAlign.CENTER,
             });
@@ -550,6 +589,34 @@ export class ClipboardPicker {
         } catch (e) {
             log(`[Clipboard] thumbnail render error: ${e}`);
         }
+    }
+
+    /**
+     * Format a short metadata string for a row: relative timestamp + type.
+     * e.g. "2 min ago · Text", "1 hr ago · Image", "Yesterday · Text".
+     */
+    _formatMeta(item) {
+        const parts = [];
+        const ts = this._relativeTime(item.timestamp);
+        if (ts) parts.push(ts);
+        parts.push(item.type === 'image' ? 'Image' : 'Text');
+        return parts.join(' · ');
+    }
+
+    _relativeTime(ts) {
+        if (!ts) return '';
+        const diff = Date.now() - ts;
+        const min = Math.floor(diff / 60000);
+        if (min < 1) return 'just now';
+        if (min < 60) return `${min} min ago`;
+        const hr = Math.floor(min / 60);
+        if (hr < 24) return `${hr} hr ago`;
+        const day = Math.floor(hr / 24);
+        if (day === 1) return 'Yesterday';
+        if (day < 7) return `${day} days ago`;
+        // Older than a week — show date.
+        const d = new Date(ts);
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     }
 
     // --- Dynamic theming ---
@@ -563,17 +630,17 @@ export class ClipboardPicker {
         if (!this.isOpen() || !this._palette) return;
         const p = this._palette;
 
-        // Window chrome — Ubuntu/Yaru uses a slightly larger radius and
-        // a softer, deeper shadow for a floating-card feel.
+        // Window chrome — floating card with deep soft shadow.
         this._actor.set_style(
             `background-color: ${p.bg};` +
             `border: 1px solid ${p.border};` +
             `color: ${p.fg};` +
-            `box-shadow: 0 16px 40px ${p.shadow}, 0 2px 8px ${p.shadow};`,
+            `box-shadow: 0 16px 48px ${p.shadow}, 0 2px 8px ${p.shadow};`,
         );
 
-        // Title bar.
+        // Title bar — distinct surface-high background.
         this._titlebar?.set_style(
+            `background-color: ${p.bgHigh};` +
             `color: ${p.fg};` +
             `border-bottom: 1px solid ${p.border};`,
         );
@@ -582,21 +649,22 @@ export class ClipboardPicker {
         // Close button.
         this._closeBtn?.set_style(`color: ${p.dim};`);
 
-        // Search entry.
+        // Search entry — pill shape, deepest surface.
         this._searchEntry?.set_style(
             `background-color: ${p.entryBg};` +
             `border: 1px solid ${p.border};` +
             `color: ${p.fg};`,
         );
 
-        // Footer.
+        // Footer — distinct surface-high background.
         this._footer?.set_style(
+            `background-color: ${p.bgHigh};` +
             `color: ${p.dim};` +
             `border-top: 1px solid ${p.border};`,
         );
         this._countLabel?.set_style(`color: ${p.dim};`);
-        // Clear-all button gets a subtle destructive tint on hover.
-        this._clearAllBtn?.set_style(`color: ${p.dim};`);
+        // Clear-all button — destructive tint.
+        this._clearAllBtn?.set_style(`color: ${p.destructive};`);
 
         // Rows + headers + empty state live inside the list box.
         const children = this._listBox?.get_children() ?? [];
@@ -619,7 +687,7 @@ export class ClipboardPicker {
             ? !!this._store.getItem(row._itemId)?.pinned
             : false;
 
-        // Layered background: base card → hover → selected (highest priority).
+        // Layered background: base → hover → selected (highest priority).
         let bg = p.card;
         if (hovered && !selected) bg = p.cardHover;
         if (selected) bg = p.cardSelected;
@@ -639,16 +707,35 @@ export class ClipboardPicker {
             `color: ${p.fg};`,
         );
 
-        // Row is now a St.Button; its child is the inner BoxLayout.
+        // Row is a St.Button; its child is the inner BoxLayout.
         const inner = row.get_child();
         const innerChildren = inner ? inner.get_children() : [];
+
+        // Thumbnail border.
+        const thumb = innerChildren.find((c) =>
+            c.has_style_class_name?.('clipboard-row-thumb') ||
+            c.has_style_class_name?.('clipboard-row-thumb-placeholder'));
+        thumb?.set_style(`border: 1px solid ${p.border};`);
+
+        // Text column: preview (fg) + metadata (dim).
+        const textCol = innerChildren.find((c) =>
+            c.has_style_class_name?.('clipboard-row-text'));
+        if (textCol) {
+            for (const child of textCol.get_children()) {
+                if (child.has_style_class_name?.('clipboard-row-meta')) {
+                    child.set_style(`color: ${p.dim};`);
+                } else {
+                    child.set_style(`color: ${p.fg};`);
+                }
+            }
+        }
 
         // Tint the pin icon amber when pinned, dim otherwise.
         const pinBtn = innerChildren.find((c) =>
             c.has_style_class_name?.('clipboard-row-pin'));
         pinBtn?.set_style(`color: ${pinned ? p.pin : p.dim};`);
 
-        // Delete + preview color.
+        // Delete button — dim, destructive on hover.
         const delBtn = innerChildren.find((c) =>
             c.has_style_class_name?.('clipboard-row-delete'));
         delBtn?.set_style(`color: ${p.dim};`);
@@ -690,16 +777,16 @@ export class ClipboardPicker {
             return Clutter.EVENT_STOP;
 
         case Clutter.KEY_Down:
-            if (this._highlighted < items.length - 1) {
-                this._highlighted += 1;
+            if (items.length > 0) {
+                this._highlighted = (this._highlighted + 1) % items.length;
                 this._applyHighlight();
                 this._scrollToHighlighted();
             }
             return Clutter.EVENT_STOP;
 
         case Clutter.KEY_Up:
-            if (this._highlighted > 0) {
-                this._highlighted -= 1;
+            if (items.length > 0) {
+                this._highlighted = (this._highlighted - 1 + items.length) % items.length;
                 this._applyHighlight();
                 this._scrollToHighlighted();
             }
