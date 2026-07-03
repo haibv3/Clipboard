@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="clipboard-extension">
+  <schema id="org.gnome.shell.extensions.clipboard"
+          path="/org/gnome/shell/extensions/clipboard/">
+
+    <!-- Global hotkey that toggles the overlay picker -->
+    <key name="toggle-picker" type="as">
+      <default>["&lt;Super&gt;&lt;Shift&gt;v"]</default>
+      <summary>Toggle picker shortcut</summary>
+      <description>Keyboard shortcut that opens/closes the clipboard overlay picker.</description>
+    </key>
+
+    <!-- Maximum number of non-pinned history items kept in RAM -->
+    <key name="history-size" type="i">
+      <range min="5" max="50"/>
+      <default>25</default>
+      <summary>History size</summary>
+      <description>Maximum number of non-pinned clipboard items kept in memory (5-50).</description>
+    </key>
+
+    <!-- Maximum byte size for an image to be stored (Phase 5) -->
+    <key name="max-image-bytes" type="i">
+      <range min="102400" max="52428800"/>
+      <default>5242880</default>
+      <summary>Max image bytes</summary>
+      <description>Images larger than this (in bytes) are skipped. Default ~5 MB.</description>
+    </key>
+
+    <!-- Whether auto-paste should be performed after selecting an item (Phase 5) -->
+    <key name="auto-paste" type="b">
+      <default>true</default>
+      <summary>Auto-paste on select</summary>
+      <description>If true, selecting an item from the picker synthesizes Ctrl+V into the focused app.</description>
+    </key>
+
+    <!-- Signal counter: prefs increments this to ask the live extension to
+         clear history (prefs runs in a separate process and cannot touch the
+         in-memory store directly). -->
+    <key name="clear-requested" type="i">
+      <default>0</default>
+      <summary>Clear history request counter</summary>
+      <description>Incremented from Preferences to request a history clear in the running shell.</description>
+    </key>
+
+  </schema>
+</schemalist>

@@ -1,0 +1,17 @@
+#!/bin/sh
+# postinst — compile the GSettings schema system-wide after install.
+# Only act on `configure` (the action that follows install/upgrade). Other
+# actions (abort-upgrade, abort-remove, abort-deconfigure) must be no-ops.
+set -e
+
+SCHEMA_DIR="/usr/share/glib-2.0/schemas"
+
+case "$1" in
+    configure)
+        if [ -d "$SCHEMA_DIR" ] && command -v glib-compile-schemas >/dev/null 2>&1; then
+            glib-compile-schemas "$SCHEMA_DIR" || true
+        fi
+        ;;
+esac
+
+exit 0

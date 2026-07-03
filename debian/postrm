@@ -1,0 +1,17 @@
+#!/bin/sh
+# postrm — recompile GSettings schemas after removal (drops our schema).
+# Only act on `remove` and `purge`; `upgrade` and `failed-upgrade` leave the
+# schema in place (it is still needed by the not-yet-removed old version).
+set -e
+
+SCHEMA_DIR="/usr/share/glib-2.0/schemas"
+
+case "$1" in
+    remove|purge)
+        if [ -d "$SCHEMA_DIR" ] && command -v glib-compile-schemas >/dev/null 2>&1; then
+            glib-compile-schemas "$SCHEMA_DIR" || true
+        fi
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+dist/
+
+# Compiled GSettings schemas
+src/schemas/*.compiled
+
+# Editor / OS
+*.swp
+*.swo
+.DS_Store
+*~

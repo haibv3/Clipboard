@@ -1,0 +1,8 @@
+clipboard-extension (1.0-1) unstable; urgency=low
+
+  * Initial packaging of the Clipboard GNOME Shell extension.
+  * Installs to /usr/share/gnome-shell/extensions/clipboard@haibachvan.local/
+    and the GSettings schema to /usr/share/glib-2.0/schemas/.
+  * Targets GNOME Shell 49/50 on Wayland.
+
+ -- haibachvan <haibachvan@local>  Wed, 01 Jul 2026 00:00:00 +0000
