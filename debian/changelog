@@ -1,3 +1,11 @@
+clipboard-extension (1.1-1) unstable; urgency=low
+
+  * v1.1: quiet debug logging, global dedup/promote, pin image persistence,
+    privacy denylists + pause capture, jpeg/webp capture, power UX (1–9,
+    Ctrl+Enter copy-only, panel recent, multi-monitor, clear confirm).
+
+ -- haibachvan <haibachvan@local>  Mon, 13 Jul 2026 00:00:00 +0000
+
 clipboard-extension (1.0-1) unstable; urgency=low
 
   * Initial packaging of the Clipboard GNOME Shell extension.

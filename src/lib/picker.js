@@ -19,10 +19,10 @@ import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 import GObject from 'gi://GObject';
 import GLib from 'gi://GLib';
-import Meta from 'gi://Meta';
 import Gio from 'gi://Gio';
 
 import * as Theme from './theme.js';
+import { debug, error } from './log.js';
 
 const CLIPBOARD = St.ClipboardType.CLIPBOARD;
 
@@ -58,6 +58,31 @@ export class ClipboardPicker {
         this._scroll = null;
         this._footer = null;
         this._clearAllBtn = null;
+        this._clearAllLabel = null;
+        this._clearConfirmTimeout = 0;
+        this._hintLabel = null;
+    }
+
+    _targetMonitor() {
+        // Prefer monitor under the focused window; fall back to current/primary.
+        try {
+            const win = global.display?.get_focus_window?.();
+            if (win) {
+                const rect = win.get_frame_rect?.();
+                if (rect) {
+                    const cx = rect.x + Math.floor((rect.width ?? 0) / 2);
+                    const cy = rect.y + Math.floor((rect.height ?? 0) / 2);
+                    const mon = Main.layoutManager.monitors.find((m) =>
+                        cx >= m.x && cx < m.x + m.width &&
+                        cy >= m.y && cy < m.y + m.height,
+                    );
+                    if (mon) return mon;
+                }
+            }
+        } catch (_e) {
+            // ignore
+        }
+        return Main.layoutManager.currentMonitor ?? Main.layoutManager.primaryMonitor;
     }
 
     isOpen() {
@@ -86,7 +111,7 @@ export class ClipboardPicker {
         // would be visible but non-interactive (no Esc/Enter/typing) — tear it
         // down immediately rather than stranding the user.
         if (!this._grab) {
-            log('[Clipboard] pushModal failed; aborting picker open');
+            error('pushModal failed; aborting picker open');
             Main.layoutManager.uiGroup.remove_child(this._actor);
             this._actor.destroy();
             this._actor = null;
@@ -136,7 +161,7 @@ export class ClipboardPicker {
                 this._grab = null;
             }
         } catch (e) {
-            log(`[Clipboard] popModal error: ${e}`);
+            error(`popModal error: ${e}`);
             this._grab = null;
         }
 
@@ -163,6 +188,10 @@ export class ClipboardPicker {
     }
 
     destroy() {
+        if (this._clearConfirmTimeout !== 0) {
+            GLib.source_remove(this._clearConfirmTimeout);
+            this._clearConfirmTimeout = 0;
+        }
         this.close();
         this._store = null;
         this._paster = null;
@@ -192,14 +221,19 @@ export class ClipboardPicker {
             y_align: Clutter.ActorAlign.CENTER,
         });
 
-        // Center within the primary monitor via constraints.
-        // Width: 480px is comfortable for previews + the title bar. Cap at 28%
-        // of monitor width so it never dominates the screen on large displays,
-        // and allow it to shrink on small displays (e.g. 1366px laptop).
-        const primary = Main.layoutManager.primaryMonitor;
-        const width = Math.min(480, Math.floor(primary.width * 0.28));
-        const height = Math.min(600, Math.floor(primary.height * 0.68));
+        // Size relative to the focused monitor (multi-monitor aware).
+        const monitor = this._targetMonitor();
+        const width = Math.min(480, Math.floor(monitor.width * 0.28));
+        const height = Math.min(600, Math.floor(monitor.height * 0.68));
         this._actor.set_size(width, height);
+        // Explicit position so dual-monitor setups center on the focused display
+        // (uiGroup CENTER align alone pins to the primary span).
+        this._actor.set_position(
+            monitor.x + Math.floor((monitor.width - width) / 2),
+            monitor.y + Math.floor((monitor.height - height) / 2),
+        );
+        this._actor.x_align = Clutter.ActorAlign.START;
+        this._actor.y_align = Clutter.ActorAlign.START;
 
         // --- Title bar (libadwaita-style header) ---
         this._titlebar = new St.BoxLayout({
@@ -256,6 +290,11 @@ export class ClipboardPicker {
         }));
         const entryClutterText = this._searchEntry.clutter_text;
         entryClutterText.connect('text-changed', () => this._onSearchChanged());
+        // Digits / nav keys land on clutter_text while search is focused — handle
+        // here so empty-search 1–9 quick-paste works (modal actor alone is not enough).
+        entryClutterText.connect('key-press-event', (_t, event) =>
+            this._onKeyPress(event),
+        );
         this._actor.add_child(this._searchEntry);
 
         // --- Scrollable list ---
@@ -287,6 +326,13 @@ export class ClipboardPicker {
         this._countLabel.set_y_align(Clutter.ActorAlign.CENTER);
         this._footer.add_child(this._countLabel);
 
+        this._hintLabel = new St.Label({
+            style_class: 'clipboard-hint',
+            text: '↵ paste · Ctrl+↵ copy · 1–9 quick',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._footer.add_child(this._hintLabel);
+
         const clearAllInner = new St.BoxLayout({
             style_class: 'clipboard-footer-inner',
             y_align: Clutter.ActorAlign.CENTER,
@@ -296,7 +342,8 @@ export class ClipboardPicker {
             icon_size: 14,
             y_align: Clutter.ActorAlign.CENTER,
         }));
-        clearAllInner.add_child(new St.Label({ text: 'Clear all' }));
+        this._clearAllLabel = new St.Label({ text: 'Clear all' });
+        clearAllInner.add_child(this._clearAllLabel);
         this._clearAllBtn = new St.Button({
             style_class: 'clipboard-clear-all button',
             can_focus: true,
@@ -304,9 +351,7 @@ export class ClipboardPicker {
             y_align: Clutter.ActorAlign.CENTER,
             child: clearAllInner,
         });
-        this._clearAllBtn.connect('clicked', () => {
-            this._store.clear();
-        });
+        this._clearAllBtn.connect('clicked', () => this._onClearAllClicked());
         this._footer.add_child(this._clearAllBtn);
         this._actor.add_child(this._footer);
 
@@ -323,8 +368,17 @@ export class ClipboardPicker {
         const items = this._store.getItems();
         if (!query) return items;
         return items.filter((it) => {
-            if (it.type === 'text') return (it.text ?? '').toLowerCase().includes(query);
-            return it.type === 'image'; // images always match (no text to filter)
+            if (it.type === 'text')
+                return (it.text ?? '').toLowerCase().includes(query);
+            if (it.type === 'image') {
+                // Match image keywords (min 3 chars) or dimensions — never always-include.
+                if (query.length >= 3 &&
+                    ('image'.includes(query) || 'img'.includes(query) || 'picture'.includes(query)))
+                    return true;
+                return `${it.width}x${it.height}`.includes(query) ||
+                    `${it.width}×${it.height}`.includes(query);
+            }
+            return false;
         });
     }
 
@@ -537,7 +591,7 @@ export class ClipboardPicker {
             y_align: Clutter.ActorAlign.CENTER,
         });
         pinBtn.connect('clicked', () => {
-            log(`[Clipboard] pin clicked for item ${item.id}`);
+            debug(`pin clicked for item ${item.id}`);
             row._childActionFired = true;
             this._store.togglePin(item.id);
         });
@@ -552,7 +606,7 @@ export class ClipboardPicker {
             y_align: Clutter.ActorAlign.CENTER,
         });
         delBtn.connect('clicked', () => {
-            log(`[Clipboard] delete clicked for item ${item.id}`);
+            debug(`delete clicked for item ${item.id}`);
             row._childActionFired = true;
             this._store.remove(item.id);
         });
@@ -568,7 +622,7 @@ export class ClipboardPicker {
                 row._childActionFired = false;
                 return;
             }
-            log(`[Clipboard] row clicked → activating item ${item.id}`);
+            debug(`row clicked → activating item ${item.id}`);
             this._activate(item.id);
         });
 
@@ -587,7 +641,7 @@ export class ClipboardPicker {
             });
             row.insert_child_at_index(icon, 0);
         } catch (e) {
-            log(`[Clipboard] thumbnail render error: ${e}`);
+            error(`thumbnail render error: ${e}`);
         }
     }
 
@@ -663,6 +717,7 @@ export class ClipboardPicker {
             `border-top: 1px solid ${p.border};`,
         );
         this._countLabel?.set_style(`color: ${p.dim};`);
+        this._hintLabel?.set_style(`color: ${p.dim};`);
         // Clear-all button — destructive tint.
         this._clearAllBtn?.set_style(`color: ${p.destructive};`);
 
@@ -760,9 +815,50 @@ export class ClipboardPicker {
         this._render();
     }
 
+    _onClearAllClicked() {
+        // Two-step confirm: first click arms, second within 3s clears.
+        if (this._clearConfirmTimeout !== 0) {
+            GLib.source_remove(this._clearConfirmTimeout);
+            this._clearConfirmTimeout = 0;
+            this._store.clear();
+            this._clearAllLabel?.set_text('Clear all');
+            return;
+        }
+        this._clearAllLabel?.set_text('Click again to confirm');
+        this._clearConfirmTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, () => {
+            this._clearConfirmTimeout = 0;
+            this._clearAllLabel?.set_text('Clear all');
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     _onKeyPress(event) {
         const key = event.get_key_symbol();
+        const state = event.get_state();
         const items = this._filteredItems();
+        const queryEmpty = !(this._searchEntry?.get_text() ?? '').trim();
+        const ctrl = (state & Clutter.ModifierType.CONTROL_MASK) !== 0;
+
+        // Ctrl+Return / Ctrl+KP_Enter → copy only (no auto-paste).
+        if (ctrl && (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter)) {
+            if (this._highlighted >= 0 && this._highlighted < items.length)
+                this._activate(items[this._highlighted].id, { paste: false });
+            return Clutter.EVENT_STOP;
+        }
+
+        // Digits 1–9 (main + keypad): quick-paste Nth item when search is empty.
+        if (queryEmpty) {
+            let idx = -1;
+            if (key >= Clutter.KEY_1 && key <= Clutter.KEY_9)
+                idx = key - Clutter.KEY_1;
+            else if (key >= Clutter.KEY_KP_1 && key <= Clutter.KEY_KP_9)
+                idx = key - Clutter.KEY_KP_1;
+            if (idx >= 0) {
+                if (idx < items.length)
+                    this._activate(items[idx].id);
+                return Clutter.EVENT_STOP;
+            }
+        }
 
         switch (key) {
         case Clutter.KEY_Escape:
@@ -771,9 +867,8 @@ export class ClipboardPicker {
 
         case Clutter.KEY_Return:
         case Clutter.KEY_KP_Enter:
-            if (this._highlighted >= 0 && this._highlighted < items.length) {
+            if (this._highlighted >= 0 && this._highlighted < items.length)
                 this._activate(items[this._highlighted].id);
-            }
             return Clutter.EVENT_STOP;
 
         case Clutter.KEY_Down:
@@ -794,10 +889,8 @@ export class ClipboardPicker {
 
         case Clutter.KEY_Delete:
         case Clutter.KEY_KP_Delete:
-            if (this._highlighted >= 0 && this._highlighted < items.length) {
-                const id = items[this._highlighted].id;
-                this._store.remove(id);
-            }
+            if (this._highlighted >= 0 && this._highlighted < items.length)
+                this._store.remove(items[this._highlighted].id);
             return Clutter.EVENT_STOP;
 
         default:
@@ -834,35 +927,36 @@ export class ClipboardPicker {
 
     // --- Activation (select + copy + close) ---
 
-    _activate(id) {
+    /**
+     * Put item on the system clipboard and close the picker.
+     * @param {string} id
+     * @param {{ paste?: boolean }} [opts] paste=true (default) auto-pastes into
+     *   the previously focused app; paste=false only updates the clipboard.
+     */
+    _activate(id, { paste = true } = {}) {
         const item = this._store.getItem(id);
         if (!item) {
-            log(`[Clipboard] _activate: item ${id} not found`);
+            debug(`_activate: item ${id} not found`);
             return;
         }
-        log(`[Clipboard] _activate: type=${item.type}, text="${item.text?.substring(0, 40) ?? ''}", hasBytes=${!!item.bytes}`);
+        debug(`_activate: type=${item.type}, paste=${paste}, hasBytes=${!!item.bytes}`);
 
         const clip = St.Clipboard.get_default();
         if (item.type === 'text') {
             clip.set_text(CLIPBOARD, item.text ?? '');
-            log('[Clipboard] _activate: set_text done');
+            debug('_activate: set_text done');
         } else if (item.type === 'image' && item.bytes) {
-            // set_content with large image bytes can block; wrap in try/catch
-            // to prevent a crash from taking down the whole shell.
             try {
                 clip.set_content(CLIPBOARD, 'image/png', item.bytes);
-                log('[Clipboard] _activate: set_content done');
+                debug('_activate: set_content done');
             } catch (e) {
-                log(`[Clipboard] _activate: set_content error: ${e}`);
+                error(`_activate: set_content error: ${e}`);
             }
         } else {
-            log(`[Clipboard] _activate: nothing to set (type=${item.type}, bytes=${!!item.bytes})`);
+            debug(`_activate: nothing to set (type=${item.type}, bytes=${!!item.bytes})`);
         }
 
-        // Prevent the monitor from re-capturing the item we just set.
-        // For images, set_content may trigger multiple owner-changed events
-        // (GNOME Shell sometimes fires twice for binary content), so ignore
-        // a few extra events to avoid re-capturing the image we just pasted.
+        // Prevent re-capturing the item we just set (images may fire twice).
         this._monitor?.setIgnoreNext();
         if (item.type === 'image') {
             this._monitor?.setIgnoreNext();
@@ -871,12 +965,11 @@ export class ClipboardPicker {
 
         this.close();
 
-        // Phase 5: auto-paste into the previously focused app.
-        if (this._paster) {
-            log('[Clipboard] _activate: calling paster.pasteAfterClose');
+        if (paste && this._paster) {
+            debug('_activate: calling paster.pasteAfterClose');
             this._paster.pasteAfterClose(item);
-        } else {
-            log('[Clipboard] _activate: no paster available');
+        } else if (!paste) {
+            debug('_activate: copy-only (no auto-paste)');
         }
     }
 }

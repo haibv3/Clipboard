@@ -1,11 +1,11 @@
 {
   "uuid": "clipboard@haibachvan.local",
   "name": "Clipboard",
-  "description": "Smart clipboard manager: keeps the last 25 copies (text + images), pin items across reboots, Super+V overlay picker with auto-paste.",
+  "description": "Smart clipboard manager: history (text + images), pin across reboots, Super+Shift+V picker with auto-paste, privacy filters, pause capture.",
   "shell-version": ["49", "50"],
   "session-modes": ["user"],
   "url": "",
   "settings-schema": "org.gnome.shell.extensions.clipboard",
   "gettext-domain": "clipboard-extension",
-  "version": 1
+  "version": 2
 }

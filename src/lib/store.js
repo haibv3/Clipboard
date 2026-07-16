@@ -1,15 +1,17 @@
 /*
  * store.js — in-memory clipboard history store.
  *
- * Phase 4: split into `_history` (RAM ring, capped at `history-size`,
- * non-pinned) and `_pinned` (unbounded, ordered, persisted via storage).
- * `getItems()` returns pinned first, then history. The cap applies only to
- * `_history`; pinned items are never evicted and exempt from the cap.
+ * Split into `_history` (RAM ring, capped at `history-size`, non-pinned) and
+ * `_pinned` (ordered, persisted via storage). Cap applies only to `_history`.
  *
- * History is RAM-only and NEVER written to disk; only pins are persisted.
+ * Content-based dedup: re-copying an existing text/image promotes that item
+ * to the head of its list instead of creating a duplicate row.
+ *
+ * History is RAM-only and NEVER written to disk; pins are persisted.
  */
 
 import GLib from 'gi://GLib';
+import { debug, error, warn } from './log.js';
 
 let _idCounter = 0;
 
@@ -20,17 +22,12 @@ function makeId() {
 
 /**
  * Compare two `GLib.Bytes` by content (size first, then bytes).
- * Returns false if either is null/empty. Used for image dedup so two
- * different images that happen to share a byte size are not treated as
- * duplicates.
  */
 function _bytesEqual(a, b) {
     if (!a || !b) return false;
     const sa = a.get_size?.() ?? 0;
     const sb = b.get_size?.() ?? 0;
     if (sa === 0 || sb === 0 || sa !== sb) return false;
-    // GLib.Bytes.equal is the cheap native path; fall back to a Uint8Array
-    // comparison if the binding is unavailable in this GJS version.
     if (typeof a.equal === 'function') return a.equal(b);
     const da = a.get_data();
     const db = b.get_data();
@@ -44,7 +41,7 @@ export class ClipboardStore {
     constructor({ settings } = {}) {
         this._settings = settings;
         this._history = []; // newest first, non-pinned, capped
-        this._pinned = []; // ordered, unbounded, persisted
+        this._pinned = []; // ordered, unbounded (image pin soft-cap separate)
         this._listeners = new Set();
         this._pinListeners = new Set();
     }
@@ -54,18 +51,32 @@ export class ClipboardStore {
         return this._settings?.get_int('history-size') ?? 25;
     }
 
+    _maxPinnedImages() {
+        return this._settings?.get_int('max-pinned-images') ?? 20;
+    }
+
+    _sameContent(a, b) {
+        if (!a || !b || a.type !== b.type) return false;
+        if (a.type === 'text') return a.text === b.text;
+        if (a.type === 'image') return _bytesEqual(a.bytes, b.bytes);
+        return false;
+    }
+
+    _findIndexByContent(list, item) {
+        return list.findIndex((it) => this._sameContent(it, item));
+    }
+
     /**
-     * Add a captured item to history. Dedups if identical to the current
-     * history head. Pinned items are never re-added by capture.
-     * Returns the stored item, or null if deduped/skipped.
+     * Add a captured item to history. Dedups by content across history and
+     * pinned lists (promote-to-top). Returns the stored item, or null if skipped.
      */
     add(item) {
-        log(`[Clipboard] store.add called: type=${item.type}, text="${item.text?.substring(0, 40) ?? ''}"`);
+        debug(`store.add called: type=${item.type}, text="${item.text?.substring(0, 40) ?? ''}"`);
         const normalized = {
             id: makeId(),
             type: item.type ?? 'text',
             text: item.text ?? null,
-            bytes: item.bytes ?? null, // GLib.Bytes for images (Phase 5)
+            bytes: item.bytes ?? null,
             thumbBytes: item.thumbBytes ?? null,
             width: item.width ?? 0,
             height: item.height ?? 0,
@@ -73,33 +84,64 @@ export class ClipboardStore {
             pinned: false,
         };
 
-        if (this._isDuplicate(normalized)) {
-            return null;
+        // 1) Match in pinned → promote within pinned, do not add to history.
+        const pinIdx = this._findIndexByContent(this._pinned, normalized);
+        if (pinIdx !== -1) {
+            const [existing] = this._pinned.splice(pinIdx, 1);
+            existing.timestamp = Date.now();
+            this._pinned.unshift(existing);
+            this._emitChanged();
+            this._emitPinsChanged();
+            return existing;
         }
 
+        // 2) Match in history → promote to head.
+        const histIdx = this._findIndexByContent(this._history, normalized);
+        if (histIdx !== -1) {
+            const [existing] = this._history.splice(histIdx, 1);
+            existing.timestamp = Date.now();
+            this._history.unshift(existing);
+            this._emitChanged();
+            return existing;
+        }
+
+        // 3) New item.
         this._history.unshift(normalized);
         this._trimHistory();
         this._emitChanged();
         return normalized;
     }
 
-    _isDuplicate(item) {
-        const head = this._history[0];
-        if (!head) return false;
-        if (item.type !== head.type) return false;
-        if (item.type === 'text') {
-            return item.text === head.text;
-        }
-        if (item.type === 'image' && head.type === 'image') {
-            return _bytesEqual(item.bytes, head.bytes);
-        }
-        return false;
-    }
-
     _trimHistory() {
         const cap = this._cap();
         while (this._history.length > cap) {
             this._history.pop();
+        }
+    }
+
+    /** Count pinned items of type image. */
+    _pinnedImageCount() {
+        return this._pinned.filter((it) => it.type === 'image').length;
+    }
+
+    /**
+     * Evict oldest image pin (end of list among images, by reverse scan)
+     * until under cap. Called before adding a new image pin.
+     */
+    _evictOldestImagePinsIfNeeded() {
+        const max = this._maxPinnedImages();
+        while (this._pinnedImageCount() >= max) {
+            // Find last image pin (oldest among images by list order: unshift = newest).
+            let idx = -1;
+            for (let i = this._pinned.length - 1; i >= 0; i--) {
+                if (this._pinned[i].type === 'image') {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx === -1) break;
+            const [evicted] = this._pinned.splice(idx, 1);
+            warn(`evicted oldest image pin ${evicted?.id ?? '?'} (cap=${max})`);
         }
     }
 
@@ -125,8 +167,7 @@ export class ClipboardStore {
     }
 
     /**
-     * Clear history only. Pinned items survive (they are persisted and
-     * exempt from the cap). Matches "Clear-all empties history".
+     * Clear history only. Pinned items survive.
      */
     clear() {
         if (this._history.length === 0) return;
@@ -151,11 +192,9 @@ export class ClipboardStore {
         return this._pinned.length + this._history.length;
     }
 
-    // --- Pin support (Phase 4) ---
-
     /**
      * Toggle pin state of an item by id.
-     * - Pin: move from history to _pinned (so it doesn't double-count).
+     * - Pin: move from history to _pinned (image soft-cap enforced).
      * - Unpin: move from _pinned back to history head (subject to cap).
      * Returns the new pinned state, or null if the item was not found.
      */
@@ -163,6 +202,8 @@ export class ClipboardStore {
         const histIdx = this._history.findIndex((it) => it.id === id);
         if (histIdx !== -1) {
             const [item] = this._history.splice(histIdx, 1);
+            if (item.type === 'image')
+                this._evictOldestImagePinsIfNeeded();
             item.pinned = true;
             this._pinned.unshift(item);
             this._trimHistory();
@@ -189,21 +230,21 @@ export class ClipboardStore {
     }
 
     /**
-     * Load persisted pins on init. Items keep their stored ids so toggling
-     * works across restarts. Tolerates missing/empty input.
+     * Load persisted pins on init. Accepts text and image items (images
+     * must already have bytes hydrated by storage).
      */
     loadPinned(pins) {
         if (!Array.isArray(pins)) return;
         this._pinned = pins
-            .filter((it) => it && it.type === 'text')
+            .filter((it) => it && (it.type === 'text' || it.type === 'image'))
             .map((it) => ({
                 id: it.id ?? makeId(),
-                type: 'text',
+                type: it.type,
                 text: it.text ?? null,
-                bytes: null,
-                thumbBytes: null,
-                width: 0,
-                height: 0,
+                bytes: it.bytes ?? null,
+                thumbBytes: it.thumbBytes ?? null,
+                width: it.width ?? 0,
+                height: it.height ?? 0,
                 timestamp: it.timestamp ?? Date.now(),
                 pinned: true,
             }));
@@ -227,7 +268,7 @@ export class ClipboardStore {
             try {
                 cb();
             } catch (e) {
-                log(`[Clipboard] store listener error: ${e}`);
+                error(`store listener error: ${e}`);
             }
         }
     }
@@ -237,7 +278,7 @@ export class ClipboardStore {
             try {
                 cb(this._pinned.slice());
             } catch (e) {
-                log(`[Clipboard] pin listener error: ${e}`);
+                error(`pin listener error: ${e}`);
             }
         }
     }

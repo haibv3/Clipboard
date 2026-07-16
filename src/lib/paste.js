@@ -1,29 +1,18 @@
 /*
  * paste.js — auto-paste the selected clipboard item into the focused app.
  *
- * After the overlay closes (releasing its modal grab), we wait a short tick for
- * focus to return to the previously focused app, then synthesize Ctrl+V via a
- * Clutter virtual keyboard device. Terminals receive Ctrl+Shift+V instead
- * (detected via the focused window's wm_class).
- *
- * This runs in-process inside gnome-shell, so it can drive a Clutter virtual
- * input device — something a standalone Wayland client cannot do.
+ * After the overlay closes, wait a short tick then synthesize Ctrl+V
+ * (Ctrl+Shift+V in terminals) via a Clutter virtual keyboard device.
  */
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
+import { debug, error } from './log.js';
 
-// Wayland needs real focus restoration time after popModal before we can
-// synthesize keystrokes. 200ms for text, 350ms for images (large clipboard
-// content takes longer to transfer to the focused app).
-const PASTE_DELAY_MS_TEXT = 200;
-const PASTE_DELAY_MS_IMAGE = 350;
-
-// wm_class values that identify terminals (use Ctrl+Shift+V there).
 const TERMINAL_WM_CLASSES = new Set([
     'gnome-terminal',
     'gnome-terminal-server',
-    'kgx', // GNOME Console
+    'kgx',
     'xterm',
     'alacritty',
     'kitty',
@@ -45,21 +34,21 @@ export class AutoPaster {
     }
 
     /**
-     * Schedule a paste of the just-selected item after the overlay closes.
-     * Honors the `auto-paste` GSettings key.
+     * Schedule a paste after the overlay closes. Honors auto-paste GSettings.
      */
     pasteAfterClose(item) {
         if (!this._settings?.get_boolean('auto-paste')) {
-            log('[Clipboard] paste: auto-paste disabled');
+            debug('paste: auto-paste disabled');
             return;
         }
         const isImage = item?.type === 'image';
-        const delay = isImage ? PASTE_DELAY_MS_IMAGE : PASTE_DELAY_MS_TEXT;
-        log(`[Clipboard] paste: scheduling paste after close (delay=${delay}ms, isImage=${isImage})`);
+        const delay = isImage
+            ? (this._settings?.get_int('paste-delay-image-ms') ?? 350)
+            : (this._settings?.get_int('paste-delay-text-ms') ?? 200);
+        debug(`paste: scheduling paste after close (delay=${delay}ms, isImage=${isImage})`);
 
-        if (this._timeoutId !== 0) {
+        if (this._timeoutId !== 0)
             GLib.source_remove(this._timeoutId);
-        }
         this._timeoutId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
             delay,
@@ -78,7 +67,7 @@ export class AutoPaster {
             const wmClass = (win.get_wm_class?.() ?? '').toLowerCase();
             return TERMINAL_WM_CLASSES.has(wmClass);
         } catch (e) {
-            log(`[Clipboard] terminal detect error: ${e}`);
+            error(`terminal detect error: ${e}`);
             return false;
         }
     }
@@ -93,7 +82,7 @@ export class AutoPaster {
             );
             return this._vk;
         } catch (e) {
-            log(`[Clipboard] virtual keyboard create error: ${e}`);
+            error(`virtual keyboard create error: ${e}`);
             return null;
         }
     }
@@ -101,32 +90,27 @@ export class AutoPaster {
     _doPaste() {
         const vk = this._getVirtualKeyboard();
         if (!vk) {
-            log('[Clipboard] paste: no virtual keyboard');
+            debug('paste: no virtual keyboard');
             return;
         }
 
         const terminal = this._isTerminalFocused();
-        log(`[Clipboard] paste: executing, terminal=${terminal}`);
-        // Use the real compositor time, not Clutter.CURRENT_TIME (0).
-        // Wayland rejects synthetic events with timestamp 0, so the paste
-        // silently never reaches the focused surface.
+        debug(`paste: executing, terminal=${terminal}`);
         const time = global.get_current_time();
         const PRESSED = Clutter.KeyState.PRESSED;
         const RELEASED = Clutter.KeyState.RELEASED;
 
         try {
             vk.notify_keyval(time, Clutter.KEY_Control_L, PRESSED);
-            if (terminal) {
+            if (terminal)
                 vk.notify_keyval(time, Clutter.KEY_Shift_L, PRESSED);
-            }
             vk.notify_keyval(time, terminal ? Clutter.KEY_V : Clutter.KEY_v, PRESSED);
             vk.notify_keyval(time, terminal ? Clutter.KEY_V : Clutter.KEY_v, RELEASED);
-            if (terminal) {
+            if (terminal)
                 vk.notify_keyval(time, Clutter.KEY_Shift_L, RELEASED);
-            }
             vk.notify_keyval(time, Clutter.KEY_Control_L, RELEASED);
         } catch (e) {
-            log(`[Clipboard] paste key synthesis error: ${e}`);
+            error(`paste key synthesis error: ${e}`);
         }
     }
 

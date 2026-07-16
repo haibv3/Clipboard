@@ -42,5 +42,56 @@
       <description>Incremented from Preferences to request a history clear in the running shell.</description>
     </key>
 
+    <!-- Verbose journal traces (clipboard content previews, mimetypes, etc.). -->
+    <key name="debug" type="b">
+      <default>false</default>
+      <summary>Debug logging</summary>
+      <description>If true, verbose clipboard capture traces go to the system journal. Default off so clipboard content is not logged.</description>
+    </key>
+
+    <!-- Soft cap on pinned images persisted to disk. -->
+    <key name="max-pinned-images" type="i">
+      <range min="1" max="50"/>
+      <default>20</default>
+      <summary>Max pinned images</summary>
+      <description>Maximum number of pinned images kept on disk. Pinning beyond this evicts the oldest image pin.</description>
+    </key>
+
+    <!-- Pause clipboard capture without disabling the extension. -->
+    <key name="capture-paused" type="b">
+      <default>false</default>
+      <summary>Pause capture</summary>
+      <description>If true, new clipboard content is not added to history.</description>
+    </key>
+
+    <!-- wm_class substrings (lowercase-matched) that should not be captured. -->
+    <key name="privacy-app-denylist" type="as">
+      <default>[]</default>
+      <summary>App denylist</summary>
+      <description>List of window class substrings; copies from matching focused apps are skipped.</description>
+    </key>
+
+    <!-- Regex patterns; if any matches clipboard text, skip storing. -->
+    <key name="privacy-text-denylist" type="as">
+      <default>[]</default>
+      <summary>Text regex denylist</summary>
+      <description>List of JavaScript regex patterns; matching text copies are not stored.</description>
+    </key>
+
+    <!-- Auto-paste delay after overlay closes (milliseconds). -->
+    <key name="paste-delay-text-ms" type="i">
+      <range min="50" max="2000"/>
+      <default>200</default>
+      <summary>Text paste delay (ms)</summary>
+      <description>Delay before synthesizing Ctrl+V after selecting a text item.</description>
+    </key>
+
+    <key name="paste-delay-image-ms" type="i">
+      <range min="50" max="2000"/>
+      <default>350</default>
+      <summary>Image paste delay (ms)</summary>
+      <description>Delay before synthesizing Ctrl+V after selecting an image item.</description>
+    </key>
+
   </schema>
 </schemalist>

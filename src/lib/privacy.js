@@ -1,20 +1,21 @@
 /*
  * privacy.js — privacy filter for clipboard capture.
  *
- * Before storing a clipboard entry, the monitor asks this filter whether the
- * current selection should be skipped. We inspect the offered mimetypes via
- * `Meta.Selection.get_mimetypes` and skip content flagged as sensitive /
- * concealed (password managers) or as file cut/copy operations.
- *
- * Limitation: not all password managers set a hint mimetype. A configurable
- * regex denylist can be added later (non-goal for v1 core).
+ * Gates (cheapest first, applied by monitor):
+ *  1. MIME sensitive / concealed / password-manager hints
+ *  2. Nautilus file-op mimetypes (unless image/png also offered)
+ *  3. App denylist (focused wm_class)
+ *  4. Text regex denylist
  */
 
 import Meta from 'gi://Meta';
+import { error, warn } from './log.js';
 
 const SELECTION_CLIPBOARD = Meta.SelectionType.SELECTION_CLIPBOARD;
 
-// Mimetypes that mark sensitive / concealed clipboard content.
+// Cap text length scanned by regex denylist (ReDoS / cost guard).
+const MAX_TEXT_CHECK = 64 * 1024;
+
 const SENSITIVE_MIMETYPES = new Set([
     'x-kde-passwordManagerHint',
     'application/x-kde-passwordManagerHint',
@@ -26,21 +27,20 @@ const SENSITIVE_MIMETYPES = new Set([
     'application/x-concealed',
 ]);
 
-// File cut/copy (Nautilus) — not real text content we want to recall.
-// Note: `text/uri-list` is intentionally NOT included here, because browsers
-// and other apps offer it alongside `text/plain` when copying a URL, and the
-// plan treats links as plain text (no special link handling in v1). Including
-// it would silently drop legitimate URL copies.
 const FILE_OP_MIMETYPES = new Set([
     'application/x-nautilus-clipboard',
     'x-special/gnome-copied-files',
 ]);
 
 export class PrivacyFilter {
+    constructor({ settings } = {}) {
+        this._settings = settings ?? null;
+        this._regexCache = new Map(); // pattern -> RegExp | null (invalid)
+    }
+
     /**
      * Returns true if the current clipboard selection should be skipped
-     * (not stored). `selection` is the `Meta.Selection` object from
-     * `global.display.get_selection()`.
+     * based on offered mimetypes.
      */
     shouldSkip(selection) {
         if (!selection) return false;
@@ -49,41 +49,76 @@ export class PrivacyFilter {
         try {
             mimetypes = selection.get_mimetypes(SELECTION_CLIPBOARD) ?? [];
         } catch (e) {
-            // If we can't read mimetypes, don't block — fall through to allow.
-            log(`[Clipboard] get_mimetypes failed: ${e}`);
+            error(`get_mimetypes failed: ${e}`);
             return false;
         }
 
-        // Sensitive mimetypes always skip (password managers), even if an
-        // image is also offered — a password manager screenshot is unlikely
-        // and the risk of storing a secret outweighs the convenience.
         for (const mt of mimetypes) {
             const lower = (mt ?? '').toLowerCase();
-            if (SENSITIVE_MIMETYPES.has(lower) || SENSITIVE_MIMETYPES.has(mt)) {
+            if (SENSITIVE_MIMETYPES.has(lower) || SENSITIVE_MIMETYPES.has(mt))
                 return true;
-            }
-            if (lower.includes('password') || lower.includes('secret') || lower.includes('concealed')) {
+            if (lower.includes('password') || lower.includes('secret') || lower.includes('concealed'))
                 return true;
-            }
         }
 
-        // File cut/copy (Nautilus) — skip UNLESS image/png is also offered.
-        // GNOME Screenshot copies the image as image/png AND may also offer
-        // x-special/gnome-copied-files (file reference). In that case the
-        // image is the primary content we want to capture, not a file op.
         const hasImage = mimetypes.some(
-            (mt) => (mt ?? '').toLowerCase() === 'image/png',
+            (mt) => (mt ?? '').toLowerCase() === 'image/png' ||
+                (mt ?? '').toLowerCase() === 'image/jpeg' ||
+                (mt ?? '').toLowerCase() === 'image/webp' ||
+                (mt ?? '').toLowerCase() === 'image/bmp',
         );
-        if (hasImage) {
-            log('[Clipboard] image/png offered, allowing despite file-op mimetypes');
+        if (hasImage)
             return false;
-        }
 
         for (const mt of mimetypes) {
             const lower = (mt ?? '').toLowerCase();
-            if (FILE_OP_MIMETYPES.has(lower) || FILE_OP_MIMETYPES.has(mt)) {
+            if (FILE_OP_MIMETYPES.has(lower) || FILE_OP_MIMETYPES.has(mt))
                 return true;
+        }
+        return false;
+    }
+
+    /**
+     * Skip if focused app wm_class matches any denylist entry (substring, ci).
+     */
+    shouldSkipApp(wmClass) {
+        const list = this._settings?.get_strv('privacy-app-denylist') ?? [];
+        if (list.length === 0) return false;
+        const c = (wmClass ?? '').toLowerCase();
+        if (!c) return false;
+        return list.some((entry) => {
+            const e = (entry ?? '').trim().toLowerCase();
+            return e.length > 0 && c.includes(e);
+        });
+    }
+
+    /**
+     * Skip if any configured regex matches the text (first 64KiB).
+     */
+    shouldSkipText(text) {
+        if (!text) return false;
+        const list = this._settings?.get_strv('privacy-text-denylist') ?? [];
+        if (list.length === 0) return false;
+
+        const sample = text.length > MAX_TEXT_CHECK
+            ? text.substring(0, MAX_TEXT_CHECK)
+            : text;
+
+        for (const pat of list) {
+            const p = (pat ?? '').trim();
+            if (!p) continue;
+            let re = this._regexCache.get(p);
+            if (re === undefined) {
+                try {
+                    re = new RegExp(p);
+                } catch (_e) {
+                    warn(`invalid privacy regex ignored: ${p}`);
+                    re = null;
+                }
+                this._regexCache.set(p, re);
             }
+            if (re && re.test(sample))
+                return true;
         }
         return false;
     }

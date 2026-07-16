@@ -13,6 +13,7 @@
  */
 
 import Gio from 'gi://Gio';
+import { error } from './log.js';
 
 const INTERFACE_SCHEMA = 'org.gnome.desktop.interface';
 
@@ -45,7 +46,7 @@ function _getSchema() {
         // path requires a source, so prefer the Gio accessor.
         _schema = Gio.Settings.new(INTERFACE_SCHEMA);
     } catch (e) {
-        log(`[Clipboard] theme: interface schema unavailable: ${e}`);
+        error(`theme: interface schema unavailable: ${e}`);
         _schema = null;
     }
     return _schema;
@@ -162,7 +163,7 @@ export function watch(cb) {
         try {
             cb(getPalette());
         } catch (e) {
-            log(`[Clipboard] theme watch callback error: ${e}`);
+            error(`theme watch callback error: ${e}`);
         }
     };
 

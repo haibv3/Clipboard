@@ -5,12 +5,12 @@
 # Uses a staging-tree approach (dpkg-deb --build) for reproducibility and
 # simplicity — no full debhelper toolchain required for a single JS extension.
 #
-# Output: dist/clipboard-extension_1.0-1_all.deb
+# Output: dist/clipboard-extension_1.1-1_all.deb
 #
 set -euo pipefail
 
 UUID="clipboard@haibachvan.local"
-VERSION="1.0"
+VERSION="1.1"
 RELEASE="1"
 PKG="clipboard-extension"
 ARCH="all"

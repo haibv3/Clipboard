@@ -1,22 +1,28 @@
 /*
  * monitor.js — event-driven clipboard monitor.
  *
- * Connects to `Meta.Selection` `owner-changed` and, on clipboard-type changes,
- * reads the current content (text now, images in Phase 5) and forwards it to
- * the `onCapture` callback as a HistoryItem. No polling → ~0% idle CPU.
+ * Connects to Meta.Selection owner-changed and reads clipboard content
+ * (text + images). No polling → ~0% idle CPU.
  *
- * Self-trigger guard: when the extension itself sets the clipboard (paste),
- * `setIgnoreNext()` is called so the re-copy of a selected item does not
- * create a duplicate history entry.
+ * Self-trigger guard: setIgnoreNext() skips captures caused by our own
+ * set_text/set_content when pasting from the picker.
  */
 
 import Meta from 'gi://Meta';
 import St from 'gi://St';
 import GLib from 'gi://GLib';
-import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
+import { debug, error } from './log.js';
+import { buildImageItemFromBytes } from './image-util.js';
 
 const CLIPBOARD = St.ClipboardType.CLIPBOARD;
+
+const IMAGE_MIME_PRIORITY = [
+    'image/png',
+    'image/jpeg',
+    'image/webp',
+    'image/bmp',
+];
 
 export class ClipboardMonitor {
     constructor({ settings, privacy, onCapture } = {}) {
@@ -28,15 +34,9 @@ export class ClipboardMonitor {
         this._handlerId = 0;
 
         this._ignoreNext = 0;
-        this._readSerial = 0; // serialize async reads, drop stale callbacks
+        this._readSerial = 0;
     }
 
-    /**
-     * Tell the monitor to ignore the next owner-changed event (caused by the
-     * extension itself putting an item back on the clipboard). Can be called
-     * multiple times to ignore several events (e.g. set_content for images
-     * may fire owner-changed more than once).
-     */
     setIgnoreNext() {
         this._ignoreNext = (this._ignoreNext || 0) + 1;
     }
@@ -50,41 +50,65 @@ export class ClipboardMonitor {
     }
 
     _onOwnerChanged(selectionType) {
-        log(`[Clipboard] owner-changed fired, type=${selectionType}`);
-        if (selectionType !== Meta.SelectionType.SELECTION_CLIPBOARD) {
+        debug(`owner-changed fired, type=${selectionType}`);
+        if (selectionType !== Meta.SelectionType.SELECTION_CLIPBOARD)
             return;
-        }
+
         if (this._ignoreNext > 0) {
-            log(`[Clipboard] ignoring (self-triggered, remaining=${this._ignoreNext - 1})`);
+            debug(`ignoring (self-triggered, remaining=${this._ignoreNext - 1})`);
             this._ignoreNext -= 1;
             return;
         }
 
-        // Privacy filter (Phase 4): consult mimetypes before reading.
-        if (this._privacy && this._privacy.shouldSkip(this._selection)) {
-            log('[Clipboard] skipping sensitive clipboard content');
+        if (this._settings?.get_boolean('capture-paused')) {
+            debug('capture paused, skipping');
             return;
         }
 
-        log('[Clipboard] reading clipboard...');
+        if (this._privacy && this._privacy.shouldSkip(this._selection)) {
+            debug('skipping sensitive clipboard content');
+            return;
+        }
+
+        if (this._privacy?.shouldSkipApp?.(this._focusWmClass())) {
+            debug('skipping capture: app denylist');
+            return;
+        }
+
+        debug('reading clipboard...');
         this._readClipboard();
+    }
+
+    _focusWmClass() {
+        try {
+            const win = global.display?.get_focus_window?.();
+            return win?.get_wm_class?.() ?? '';
+        } catch (_e) {
+            return '';
+        }
+    }
+
+    _getMimetypes() {
+        try {
+            return this._selection.get_mimetypes(Meta.SelectionType.SELECTION_CLIPBOARD) ?? [];
+        } catch (e) {
+            error(`get_mimetypes failed: ${e}`);
+            return [];
+        }
+    }
+
+    _pickImageMime(mimetypes) {
+        const lower = mimetypes.map((m) => (m ?? '').toLowerCase());
+        return IMAGE_MIME_PRIORITY.find((m) => lower.includes(m)) ?? null;
     }
 
     _readClipboard() {
         const serial = ++this._readSerial;
         const clip = St.Clipboard.get_default();
+        const mimetypes = this._getMimetypes();
+        debug(`mimetypes: [${mimetypes.join(', ')}]`);
 
-        let mimetypes = [];
-        try {
-            mimetypes = this._selection.get_mimetypes(Meta.SelectionType.SELECTION_CLIPBOARD) ?? [];
-        } catch (e) {
-            log(`[Clipboard] get_mimetypes in _readClipboard failed: ${e}`);
-        }
-        log(`[Clipboard] mimetypes: [${mimetypes.join(', ')}]`);
-
-        const hasPng = mimetypes.some(
-            (mt) => (mt ?? '').toLowerCase() === 'image/png',
-        );
+        const imageMime = this._pickImageMime(mimetypes);
         const hasUriList = mimetypes.some(
             (mt) => (mt ?? '').toLowerCase() === 'text/uri-list',
         );
@@ -93,74 +117,67 @@ export class ClipboardMonitor {
             return l === 'text/plain' || l === 'text/plain;charset=utf-8';
         });
 
-        // --- Image path detection (text/uri-list or text/plain with path) ---
         if (hasUriList) {
-            log('[Clipboard] text/uri-list offered → trying image file load');
+            debug('text/uri-list offered → trying image file load');
             this._maybeReadImageFile(serial, clip);
             return;
         }
 
-        // --- Both image/png AND text offered → capture BOTH as separate items ---
-        if (hasPng && hasText) {
-            log('[Clipboard] both image/png and text/plain offered → capturing both');
-            // Read text first (async), then image. Both forwarded separately.
+        if (imageMime && hasText) {
+            debug(`both ${imageMime} and text/plain offered → capturing both`);
             clip.get_text(CLIPBOARD, (_c, text) => {
                 if (serial !== this._readSerial) return;
                 if (text && text.length > 0 && !this._isImagePath(text)) {
-                    log(`[Clipboard] capturing text alongside image: "${text.substring(0, 40)}"`);
-                    this._forward({ type: 'text', text });
+                    if (!this._privacy?.shouldSkipText?.(text)) {
+                        debug(`capturing text alongside image: "${text.substring(0, 40)}"`);
+                        this._forward({ type: 'text', text });
+                    } else {
+                        debug('text denylist matched (alongside image)');
+                    }
                 }
-                // Now read the image.
-                this._maybeReadImage(serial, clip);
+                this._maybeReadImage(serial, clip, imageMime);
             });
             return;
         }
 
-        // --- Only image/png offered → image capture ---
-        if (hasPng) {
-            log('[Clipboard] image/png only → direct image capture');
-            this._maybeReadImage(serial, clip);
+        if (imageMime) {
+            debug(`${imageMime} only → image capture`);
+            this._maybeReadImage(serial, clip, imageMime);
             return;
         }
 
-        // --- Default: try text first, fall back to image ---
         clip.get_text(CLIPBOARD, (_c, text) => {
             if (serial !== this._readSerial) return;
 
-            log(`[Clipboard] get_text returned: "${text?.substring(0, 40) ?? 'null'}" (len=${text?.length ?? 0})`);
+            debug(`get_text returned: "${text?.substring(0, 40) ?? 'null'}" (len=${text?.length ?? 0})`);
             if (text && text.length > 0) {
-                // GNOME Screenshot on some configs copies ONLY text/plain
-                // containing the file path (no image/png, no text/uri-list).
                 if (this._isImagePath(text)) {
-                    log(`[Clipboard] text is an image file path → loading image`);
+                    debug('text is an image file path → loading image');
                     this._loadImageFromPath(serial, text);
+                    return;
+                }
+                if (this._privacy?.shouldSkipText?.(text)) {
+                    debug('text denylist matched, skipping');
                     return;
                 }
                 this._forward({ type: 'text', text });
                 return;
             }
 
-            // No text — try image/png as a last resort.
-            this._maybeReadImage(serial, clip);
+            // Last resort: any image mime.
+            const mime = this._pickImageMime(this._getMimetypes());
+            if (mime)
+                this._maybeReadImage(serial, clip, mime);
         });
     }
 
-    /**
-     * Check if a text string looks like a path to an image file.
-     * Handles both plain paths ("/home/user/Pictures/Screenshot.png")
-     * and file:// URIs.
-     */
     _isImagePath(text) {
         const trimmed = text.trim();
         if (!trimmed) return false;
-        // Single line only (real text with newlines is not a path).
         if (trimmed.includes('\n')) return false;
-        // Extract path from file:// URI if present.
         let path = trimmed;
-        if (path.startsWith('file://')) {
+        if (path.startsWith('file://'))
             path = path.replace('file://', '');
-        }
-        // Must be an absolute path.
         if (!path.startsWith('/')) return false;
         const lower = path.toLowerCase();
         return lower.endsWith('.png') || lower.endsWith('.jpg') ||
@@ -168,165 +185,112 @@ export class ClipboardMonitor {
             lower.endsWith('.webp');
     }
 
-    /**
-     * Load an image from a file path and forward it as an image item.
-     * File I/O is deferred to an idle callback to avoid blocking.
-     */
     _loadImageFromPath(serial, text) {
         let path = text.trim();
-        if (path.startsWith('file://')) {
+        if (path.startsWith('file://'))
             path = path.replace('file://', '');
-        }
         GLib.idle_add(GLib.PRIORITY_LOW, () => {
             if (serial !== this._readSerial) return GLib.SOURCE_REMOVE;
             try {
                 const file = Gio.File.new_for_path(path);
                 const [success, bytes] = file.load_contents(null);
                 if (!success || !bytes) {
-                    log('[Clipboard] image path: failed to load file');
-                    this._forward({ type: 'text', text });
+                    error('image path: failed to load file');
+                    if (!this._privacy?.shouldSkipText?.(text))
+                        this._forward({ type: 'text', text });
                     return GLib.SOURCE_REMOVE;
                 }
 
                 const size = bytes.length ?? bytes.get_size?.() ?? 0;
                 const maxBytes = this._settings?.get_int('max-image-bytes') ?? 5242880;
                 if (size > maxBytes) {
-                    log(`[Clipboard] image path: over cap (${size} > ${maxBytes})`);
-                    this._forward({ type: 'text', text });
+                    debug(`image path: over cap (${size} > ${maxBytes})`);
+                    if (!this._privacy?.shouldSkipText?.(text))
+                        this._forward({ type: 'text', text });
                     return GLib.SOURCE_REMOVE;
                 }
 
                 const glibBytes = bytes instanceof GLib.Bytes
-                    ? bytes
+                    ? new GLib.Bytes(bytes.get_data())
                     : new GLib.Bytes(bytes);
-                log(`[Clipboard] image path: loaded (${size} bytes)`);
+                debug(`image path: loaded (${size} bytes)`);
                 this._buildImageItem(glibBytes);
             } catch (e) {
-                log(`[Clipboard] image path: load error: ${e}`);
-                this._forward({ type: 'text', text });
+                error(`image path: load error: ${e}`);
+                if (!this._privacy?.shouldSkipText?.(text))
+                    this._forward({ type: 'text', text });
             }
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _maybeReadImage(serial, clip) {
-        // Only attempt image capture if image/png is offered.
-        let mimetypes = [];
-        try {
-            mimetypes = this._selection.get_mimetypes(Meta.SelectionType.SELECTION_CLIPBOARD) ?? [];
-        } catch (e) {
-            log(`[Clipboard] _maybeReadImage get_mimetypes failed: ${e}`);
-            return;
-        }
-        const hasPng = mimetypes.some((mt) => (mt ?? '').toLowerCase() === 'image/png');
-        if (!hasPng) {
-            log('[Clipboard] no image/png offered, skipping image capture');
+    _maybeReadImage(serial, clip, mimeHint = null) {
+        const mimetypes = this._getMimetypes();
+        const mime = mimeHint ?? this._pickImageMime(mimetypes);
+        if (!mime) {
+            debug('no image mime offered, skipping image capture');
             return;
         }
 
         const maxBytes = this._settings?.get_int('max-image-bytes') ?? 5242880;
-        log(`[Clipboard] requesting image/png content (cap=${maxBytes} bytes)`);
+        debug(`requesting ${mime} content (cap=${maxBytes} bytes)`);
 
-        clip.get_content(CLIPBOARD, 'image/png', (_c, bytes) => {
-            if (serial !== this._readSerial) return; // stale
+        clip.get_content(CLIPBOARD, mime, (_c, bytes) => {
+            if (serial !== this._readSerial) return;
             if (!bytes) {
-                log('[Clipboard] get_content returned null bytes');
+                debug('get_content returned null bytes');
                 return;
             }
 
             const size = bytes.get_size();
-            log(`[Clipboard] image bytes received: ${size} bytes`);
+            debug(`image bytes received: ${size} bytes`);
             if (size <= 0) return;
             if (size > maxBytes) {
-                log(`[Clipboard] skipping image over cap (${size} > ${maxBytes} bytes)`);
+                debug(`skipping image over cap (${size} > ${maxBytes} bytes)`);
                 return;
             }
 
-            // Defensive copy: the GLib.Bytes returned by get_content is backed
-            // by memory owned by mutter's MetaSelectionSourceMemory, which is
-            // freed as soon as the clipboard changes again. If we stored that
-            // wrapper directly, re-activating the item later (set_content)
-            // would touch freed memory → "double free or corruption" and a
-            // gnome-shell crash (which takes down the whole Wayland session).
-            // Copy the data into a fresh GLib.Bytes we own, with its own
-            // refcount and owned buffer, so the item stays valid indefinitely.
+            // Own the buffer so mutter can free the selection source.
             const ownedBytes = new GLib.Bytes(bytes.get_data());
             this._buildImageItem(ownedBytes);
         });
     }
 
     _buildImageItem(bytes) {
-        // Defer heavy pixbuf decoding to an idle callback so we don't block
-        // the current main-loop iteration (which could be processing the
-        // owner-changed event chain). This prevents the shell from freezing
-        // on large screenshots.
         GLib.idle_add(GLib.PRIORITY_LOW, () => {
             try {
-                const stream = Gio.MemoryInputStream.new_from_bytes(bytes);
-                const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(stream, null);
-                const width = pixbuf.get_width();
-                const height = pixbuf.get_height();
-                log(`[Clipboard] image decoded: ${width}×${height}`);
-
-                // Safety cap: skip extremely large images that could OOM.
-                const MAX_DIM = 8000;
-                if (width > MAX_DIM || height > MAX_DIM) {
-                    log(`[Clipboard] skipping oversized image (${width}×${height} > ${MAX_DIM})`);
-                    return GLib.SOURCE_REMOVE;
-                }
-
-                // Downscaled thumbnail (max 48px on the longest edge).
-                // Use NEAREST for speed — this is just a tiny preview icon.
-                const maxThumb = 48;
-                let tw = width;
-                let th = height;
-                if (width > height) {
-                    tw = maxThumb;
-                    th = Math.max(1, Math.round((height / width) * maxThumb));
-                } else {
-                    th = maxThumb;
-                    tw = Math.max(1, Math.round((width / height) * maxThumb));
-                }
-                const thumb = pixbuf.scale_simple(tw, th, GdkPixbuf.InterpType.NEAREST);
-
-                const [, thumbBytes] = thumb.save_to_bufferv('png', [], []);
-                const thumbGlibBytes = new GLib.Bytes(thumbBytes);
-
+                const item = buildImageItemFromBytes(bytes);
+                if (!item) return GLib.SOURCE_REMOVE;
+                debug(`image decoded: ${item.width}×${item.height}`);
                 this._forward({
                     type: 'image',
-                    bytes,
-                    thumbBytes: thumbGlibBytes,
-                    width,
-                    height,
+                    bytes: item.bytes,
+                    thumbBytes: item.thumbBytes,
+                    width: item.width,
+                    height: item.height,
                 });
             } catch (e) {
-                log(`[Clipboard] image capture/thumbnail error: ${e}`);
+                error(`image capture/thumbnail error: ${e}`);
             }
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    /**
-     * Handle text/uri-list clipboard content (e.g. GNOME Screenshot saving
-     * to a file and copying the file URI). Reads the URI, loads the file
-     * if it's an image, and forwards it as an image item.
-     */
     _maybeReadImageFile(serial, clip) {
         clip.get_text(CLIPBOARD, (_c, text) => {
             if (serial !== this._readSerial) return;
             if (!text) {
-                log('[Clipboard] uri-list: no text returned');
+                debug('uri-list: no text returned');
                 return;
             }
 
-            // text/uri-list format: "file:///path/to/file.png\n"
             const uri = text.trim().split('\n')[0].trim();
-            log(`[Clipboard] uri-list: uri="${uri}"`);
+            debug(`uri-list: uri="${uri}"`);
 
-            // Only handle file:// URIs pointing to image files.
             if (!uri.startsWith('file://')) {
-                log('[Clipboard] uri-list: not a file URI, storing as text');
-                this._forward({ type: 'text', text });
+                debug('uri-list: not a file URI, storing as text');
+                if (!this._privacy?.shouldSkipText?.(text))
+                    this._forward({ type: 'text', text });
                 return;
             }
 
@@ -337,8 +301,9 @@ export class ClipboardMonitor {
                 lower.endsWith('.webp');
 
             if (!isImage) {
-                log(`[Clipboard] uri-list: not an image file (${path}), storing as text`);
-                this._forward({ type: 'text', text });
+                debug(`uri-list: not an image file (${path}), storing as text`);
+                if (!this._privacy?.shouldSkipText?.(text))
+                    this._forward({ type: 'text', text });
                 return;
             }
 
@@ -346,35 +311,34 @@ export class ClipboardMonitor {
                 const file = Gio.File.new_for_path(path);
                 const [success, bytes] = file.load_contents(null);
                 if (!success || !bytes) {
-                    log('[Clipboard] uri-list: failed to load file contents');
+                    error('uri-list: failed to load file contents');
                     return;
                 }
 
                 const size = bytes.length ?? bytes.get_size?.() ?? 0;
                 const maxBytes = this._settings?.get_int('max-image-bytes') ?? 5242880;
                 if (size > maxBytes) {
-                    log(`[Clipboard] uri-list: image over cap (${size} > ${maxBytes})`);
+                    debug(`uri-list: image over cap (${size} > ${maxBytes})`);
                     return;
                 }
 
-                // Convert to GLib.Bytes for consistent handling.
                 const glibBytes = bytes instanceof GLib.Bytes
-                    ? bytes
+                    ? new GLib.Bytes(bytes.get_data())
                     : new GLib.Bytes(bytes);
-                log(`[Clipboard] uri-list: loaded image file (${size} bytes)`);
+                debug(`uri-list: loaded image file (${size} bytes)`);
                 this._buildImageItem(glibBytes);
             } catch (e) {
-                log(`[Clipboard] uri-list: error loading image file: ${e}`);
+                error(`uri-list: error loading image file: ${e}`);
             }
         });
     }
 
     _forward(item) {
-        log(`[Clipboard] forwarding item: type=${item.type}, text="${item.text?.substring(0, 40) ?? ''}"`);
+        debug(`forwarding item: type=${item.type}, text="${item.text?.substring(0, 40) ?? ''}"`);
         try {
             this._onCapture?.(item);
         } catch (e) {
-            log(`[Clipboard] onCapture error: ${e}`);
+            error(`onCapture error: ${e}`);
         }
     }
 

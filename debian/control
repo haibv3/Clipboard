@@ -12,8 +12,10 @@ Depends: gnome-shell (>= 49), libglib2.0-bin
 Recommends: libgdk-pixbuf-2.0-0
 Description: Smart clipboard manager GNOME Shell extension
  A lightweight GNOME Shell extension that keeps the last 25 clipboard items
- (text + images), supports pinning items across reboots, and recalls them
- from a Super+V overlay picker that auto-pastes into the focused app.
+ (text + images), supports pinning text and images across reboots, and
+ recalls them from a Super+Shift+V overlay picker that auto-pastes into
+ the focused app.
  .
- Event-driven (no polling), privacy-aware (skips password-manager content),
- and ships system-wide under /usr/share/gnome-shell/extensions/.
+ Event-driven (no polling), privacy-aware (MIME filter, optional denylists,
+ pause capture), and ships system-wide under
+ /usr/share/gnome-shell/extensions/.

@@ -146,6 +146,11 @@
     spacing: 6px;
 }
 
+.clipboard-hint {
+    font-size: 11px;
+    opacity: 0.85;
+}
+
 .clipboard-count {
     font-size: 13px;
     font-weight: 400;

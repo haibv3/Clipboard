@@ -54,3 +54,8 @@ Multi-desktop/KDE/X11 backends, persistent full history, cloud sync, primary-sel
 ## Dependencies
 
 <!-- Cross-plan dependencies -->
+
+## Follow-up
+
+v1 is complete. Next roadmap: **[v1.1 Polish, Privacy & Power UX](./260713-clipboard-v11-improvements/plan.md)**
+(phases 1–7: logging, global dedup, pin images, privacy/pause, capture polish, power UX, ship).
